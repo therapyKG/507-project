@@ -12,20 +12,27 @@
 (define softmax 'softmax)
 (define none 'none)
 
+;; Keywords: Define as syntax that errors if evaluated directly.
+;; This prevents "unbound identifier" errors while ensuring they act as keywords.
+(define-syntax (with stx) (raise-syntax-error #f "Keyword 'with' used as an expression. It must be used inside (pipeline ...)." stx))
+(define-syntax (vram stx) (raise-syntax-error #f "Keyword 'vram' used as an expression." stx))
+(define on 'on)
+
 ;; Structs
 (struct layer (type params activation) #:transparent)
 (struct model-struct (layers bit-width) #:transparent)
 (struct dataset-struct (spec count shape bit-width) #:transparent)
-(struct train-config (vram-mb batch-size) #:transparent)
+
+;; New Structures for Pipeline
+(struct train-job (model dataset) #:transparent)
+(struct pipeline-config (vram-mb) #:transparent)
 
 ;; ============================================================
-;; 2. Syntax Helpers (Bits & Parsing)
+;; 2. Syntax Helpers
 ;; ============================================================
 
-;; The user writes (bits 32), which evaluates to a tagged list.
 (define (bits n) (list 'dsl-bits-tag n))
 
-;; Helper to extract bit-width from a list of mixed arguments
 (define (extract-bits args [default 32])
   (define found (findf (lambda (x) (and (list? x) 
                                         (not (empty? x)) 
@@ -33,7 +40,6 @@
                        args))
   (if found (cadr found) default))
 
-;; Helper to remove the bits tag from arguments to get the rest
 (define (remove-bits args)
   (filter (lambda (x) (not (and (list? x) 
                                 (not (empty? x)) 
@@ -41,7 +47,7 @@
           args))
 
 ;; ============================================================
-;; 3. Layer Constructors
+;; 3. Constructors
 ;; ============================================================
 
 (define (linear in-dim out-dim [act none])
@@ -56,26 +62,25 @@
 (define (flatten)
   (layer 'flatten '() none))
 
-;; ============================================================
-;; 4. DSL Structural Elements
-;; ============================================================
-
 (define (sequence . layers)
   layers)
 
-;; Model: Accepts (sequence ...) and optional (bits N) in any order
 (define (model . args)
-  (define bit-width (extract-bits args 32)) ;; Default to 32 bits
+  (define bit-width (extract-bits args 32))
   (define clean-args (remove-bits args))
-  
-  ;; The sequence of layers is expected to be the first remaining argument
   (define layers (if (empty? clean-args) '() (first clean-args)))
-  
   (model-struct layers bit-width))
 
-;; Dataset: Accepts spec, count, dims..., and optional (bits N)
 (define (dataset spec count . args)
-  (define bit-width (extract-bits args 32)) ;; Default to 32 bits
+  (define bit-width (extract-bits args 32))
   (define dims (remove-bits args))
-  
   (dataset-struct spec count dims bit-width))
+
+;; ============================================================
+;; 4. Train Macro (Data Construction Only)
+;; ============================================================
+
+(define-syntax train
+  (syntax-rules (on)
+    [(_ model-expr on dataset-expr)
+     (train-job model-expr dataset-expr)]))
