@@ -7,7 +7,7 @@
 (provide pipeline)
 
 ;; ============================================================
-;; 1. Concrete Layer Analysis (Helper)
+;; 1. Concrete Layer Analysis (Helpers)
 ;; ============================================================
 
 (define (count-layer-params lyr)
@@ -23,7 +23,6 @@
          (values (list out) (format "Dim Mismatch: Linear expects ~a, got ~a" in curr-dim)))]
     [((layer 'linear _ _) other) (values '(0) (format "Linear expects 1D, got ~a" other))]
     
-    ;; FIX: Added (+ ... 1) to the dimension calculation
     [((layer 'conv (list in out k s p) _) (list c h w))
      (if (= in c)
          (values (list out 
@@ -41,90 +40,61 @@
     [(_ _) (values '(0) "Unknown layer")]))
 
 ;; ============================================================
-;; 2. Job Analysis (Returns memory coefficients)
+;; 2. Job Analysis
 ;; ============================================================
 
-(struct job-metrics (id name static-bytes per-sample-bytes max-count) #:transparent)
+;; Updated struct to store separated memory factors
+(struct job-metrics (id name models static-bytes act-bytes-per-sample input-bytes-per-sample max-count) #:transparent)
 
 (define (analyze-job job index)
-  (define mdl (train-job-model job))
+  (define models (train-job-models job)) 
   (define data (train-job-dataset job))
   
   (define input-shape (dataset-struct-shape data))
-  (define layers (model-struct-layers mdl))
-  (define model-bytes (/ (model-struct-bit-width mdl) 8.0))
   (define data-bytes (/ (dataset-struct-bit-width data) 8.0))
-  
-  ;; 1. Trace Architecture
-  (define total-params 0)
-  (define input-elements (if (empty? input-shape) 0 (apply * input-shape)))
-  (define total-activation-elements 0)
-  
-  (define-values (final-shape error-count)
-    (for/fold ([current-shape input-shape] [err-count 0])
-              ([l layers] [i (in-naturals 1)])
-      (set! total-params (+ total-params (count-layer-params l)))
-      (define-values (next-shape error-msg) (validate-layer l current-shape))
-      (unless (eq? (layer-type l) 'flatten)
-        (set! total-activation-elements (+ total-activation-elements (apply * next-shape))))
-      (when error-msg (printf "    [Job ~a ERROR] Layer ~a: ~a\n" index i error-msg))
-      (values next-shape (if error-msg (+ err-count 1) err-count))))
 
-  (if (> error-count 0)
-      #f 
+  (printf "  - Job ~a: ~a on ~a\n" index (dataset-struct-spec data) input-shape)
+
+  (define total-params 0)
+  (define total-activation-elements 0)
+  (define input-elements (if (empty? input-shape) 0 (apply * input-shape)))
+  
+  (define-values (final-shape total-error-count)
+    (for/fold ([current-shape input-shape] [err-acc 0])
+              ([m models] [m-idx (in-naturals 1)])
+      
+      (define layers (model-struct-layers m))
+      (define-values (m-out-shape m-errs)
+        (for/fold ([c-shape current-shape] [e-acc 0])
+                  ([l layers] [l-idx (in-naturals 1)])
+          (set! total-params (+ total-params (count-layer-params l)))
+          (define-values (next-shape error-msg) (validate-layer l c-shape))
+          (unless (eq? (layer-type l) 'flatten)
+            (set! total-activation-elements (+ total-activation-elements (apply * next-shape))))
+          (when error-msg (printf "    [Job ~a Model ~a Layer ~a] ERROR: ~a\n" index m-idx l-idx error-msg))
+          (values next-shape (if error-msg (+ e-acc 1) e-acc))))
+      (values m-out-shape (+ err-acc m-errs))))
+
+  (if (> total-error-count 0)
+      #f
       (job-metrics
        index
        (dataset-struct-spec data)
-       (inexact->exact (round (* total-params model-bytes 4))) ;; Static
-       (inexact->exact (round (+ (* total-activation-elements model-bytes 2) (* input-elements data-bytes)))) ;; Per Sample
+       models
+       0 ;; Placeholder for aggregated static (unused in liveness solver)
+       ;; Activations: Total elements * 4 bytes (float32) * 2 (fwd+bwd)
+       (inexact->exact (round (* total-activation-elements 4 2))) 
+       ;; Input Data: Elements * data-width
+       (inexact->exact (round (* input-elements data-bytes)))
        (dataset-struct-count data))))
 
-;; ============================================================
-;; 3. Partition Solver (Optimizes a specific group)
-;; ============================================================
-
-(define (solve-partition partition-id group-metrics vram-limit-bytes)
-  (printf "\n  [Partition ~a]: Executing ~a jobs concurrently\n" 
-          partition-id (length group-metrics))
-  
-  (define sym-batches 
-    (for/list ([m group-metrics]) 
-      (define-symbolic* b integer?) 
-      b))
-  
-  (define (memory-cost idx batch-var)
-    (define m (list-ref group-metrics idx))
-    (+ (job-metrics-static-bytes m) 
-       (* (job-metrics-per-sample-bytes m) batch-var)))
-
-  (define total-memory-usage (apply + (for/list ([b sym-batches] [i (in-naturals)]) (memory-cost i b))))
-
-  (define constraints
-    (and 
-     (<= total-memory-usage vram-limit-bytes)
-     (apply && (for/list ([b sym-batches] [m group-metrics])
-                  (and (>= b 1) (<= b (job-metrics-max-count m)))))))
-
-  (define sum-batches (apply + sym-batches))
-  (define solution 
-    (optimize #:maximize (list sum-batches)
-              #:guarantee (assert constraints)))
-  
-  (if (unsat? solution)
-      (begin (printf "    FAILED: Could not find valid batch sizes.\n") #f)
-      (begin
-        (define partition-mem 0)
-        (for ([b sym-batches] [m group-metrics])
-          (define val (evaluate b solution))
-          (define mem (+ (job-metrics-static-bytes m) (* (job-metrics-per-sample-bytes m) val)))
-          (set! partition-mem (+ partition-mem mem))
-          (printf "    - Job ~a (~a): Batch ~a | Mem ~a MB\n" 
-                  (job-metrics-id m) (job-metrics-name m) val (~r (/ mem 1024.0 1024.0) #:precision 2)))
-        (printf "    >> Partition VRAM Usage: ~a MB\n" (~r (/ partition-mem 1024.0 1024.0) #:precision 2))
-        #t)))
+(define (get-model-static-bytes m)
+  (define b (/ (model-struct-bit-width m) 8.0))
+  (define params (for/sum ([l (model-struct-layers m)]) (count-layer-params l)))
+  (inexact->exact (round (* params b 4))))
 
 ;; ============================================================
-;; 4. Pipeline Orchestrator (Greedy Partitioning)
+;; 3. Liveness-Aware Solver & Reporting
 ;; ============================================================
 
 (define (solve-pipeline jobs config)
@@ -134,62 +104,145 @@
   (printf "\n=== Pipeline Memory Planning ===\n")
   (printf "Global VRAM Budget: ~a MB\n" vram-limit-mb)
   
-  ;; 1. Analyze all jobs first
-  (define all-metrics
+  (define metrics-list
     (for/list ([j jobs] [i (in-naturals 1)])
       (analyze-job j i)))
 
   (cond
-    [(member #f all-metrics) 
+    [(member #f metrics-list) 
      (printf "Status: FAILED (Architecture Errors)\n") #f]
     [else
-     ;; 2. Partition Strategy Loop
-     (define partitions '())
-     (define current-group '())
-     (define current-min-cost 0)
-     (define failure #f)
-
-     (for ([m all-metrics])
-       #:break failure
-       (define job-min-cost (+ (job-metrics-static-bytes m) (job-metrics-per-sample-bytes m)))
-       
-       (cond
-         ;; Case A: Single job is too big for VRAM
-         [(> job-min-cost vram-limit-bytes)
-          (printf "\nCRITICAL ERROR: Job ~a (~a) requires ~a MB (min), which exceeds VRAM limit.\n"
-                  (job-metrics-id m) (job-metrics-name m) (~r (/ job-min-cost 1024.0 1024.0) #:precision 2))
-          (set! failure #t)]
-         
-         ;; Case B: Job fits in current group
-         [(<= (+ current-min-cost job-min-cost) vram-limit-bytes)
-          (set! current-group (append current-group (list m)))
-          (set! current-min-cost (+ current-min-cost job-min-cost))]
-         
-         ;; Case C: Job doesn't fit -> Commit current group, start new one
-         [else
-          (set! partitions (append partitions (list current-group)))
-          (set! current-group (list m))
-          (set! current-min-cost job-min-cost)]))
+     ;; Component Identification
+     (define all-models (remove-duplicates (apply append (map job-metrics-models metrics-list)) eq?))
+     (define model-ids (for/list ([m all-models] [i (in-naturals)]) (cons m i)))
+     (define (get-id m) (cdr (assq m model-ids)))
+     (define (get-comp-size id) 
+       (define m (car (findf (lambda (p) (= (cdr p) id)) model-ids)))
+       (get-model-static-bytes m))
      
-     ;; Add remaining group
-     (unless (empty? current-group)
-       (set! partitions (append partitions (list current-group))))
+     (define (ids->names ids)
+       (for/list ([id ids])
+         (define m (car (findf (lambda (p) (= (cdr p) id)) model-ids)))
+         (format "~a:~a" id (model-struct-name m))))
 
-     (if failure
-         #f
+     (define component-info
+       (for/list ([m all-models])
+         (define id (get-id m))
+         (define size (get-model-static-bytes m))
+         (define used-in-indices
+           (for/list ([j metrics-list] [idx (in-naturals 0)]
+                      #:when (member m (job-metrics-models j)))
+             idx))
+         (list m id size (first used-in-indices) (last used-in-indices))))
+
+     (printf "\nDetected ~a Unique Components:\n" (length all-models))
+     (for ([c component-info])
+       (match-define (list m id size start end) c)
+       (printf "  [C~a] ~a (uid:~a): ~a MB | Jobs ~a -> ~a\n" 
+               id (model-struct-name m) (model-struct-uid m) 
+               (~r (/ size 1024.0 1024.0) #:precision 2) (+ 1 start) (+ 1 end)))
+
+     ;; Symbolic Setup
+     (define sym-batches 
+       (for/list ([m metrics-list]) (define-symbolic* b integer?) b))
+
+     (printf "\nGenerating Memory Plan...\n")
+     
+     (define constraints
+       (apply &&
+        (for/list ([j-metric metrics-list] [j-idx (in-naturals)] [batch-var sym-batches])
+          (define required-comps 
+            (filter (lambda (c) (member (first c) (job-metrics-models j-metric))) component-info))
+          
+          (define required-mem (apply + (map third required-comps)))
+          ;; Updated to use sum of activations + inputs
+          (define dynamic-mem-expr 
+            (* (+ (job-metrics-act-bytes-per-sample j-metric) 
+                  (job-metrics-input-bytes-per-sample j-metric)) 
+               batch-var))
+          
+          (and (>= batch-var 1)
+               (<= batch-var (job-metrics-max-count j-metric))
+               (<= (+ required-mem dynamic-mem-expr) vram-limit-bytes)))))
+
+     ;; Solve
+     (define sum-batches (apply + sym-batches))
+     (define solution (optimize #:maximize (list sum-batches) #:guarantee (assert constraints)))
+
+     (if (unsat? solution)
+         (begin (printf "Status: FAILED (OOM - Cannot fit basic requirements)\n") #f)
          (begin
-           (printf "\nStrategy: Split pipeline into ~a sequential partitions.\n" (length partitions))
-           (define all-ok #t)
-           (for ([p partitions] [i (in-naturals 1)])
-             (unless (solve-partition i p vram-limit-bytes)
-               (set! all-ok #f)))
+           (printf "\nStatus: SUCCESS\n")
+           (printf "------------------------------------------------------------\n")
            
-           (if all-ok
-               (printf "\nStatus: SUCCESS (Plan Generated)\n")
-               (printf "\nStatus: FAILED (Solver Error)\n"))))]))
+           (define resident-set '()) 
+           
+           (for ([j-idx (in-naturals)] [j-metric metrics-list] [batch-sym sym-batches])
+             (define val (evaluate batch-sym solution))
+             
+             (define required-indices (map get-id (job-metrics-models j-metric)))
+             
+             (define idle-candidates
+               (filter (lambda (c) 
+                         (match-define (list _ idx _ start end) c)
+                         (and (<= start j-idx end) (not (member idx required-indices))))
+                       component-info))
+             
+             (define req-mem (apply + (map get-comp-size required-indices)))
+             
+             ;; Calculate broken down memory costs
+             (define act-mem (* (job-metrics-act-bytes-per-sample j-metric) val))
+             (define inp-mem (* (job-metrics-input-bytes-per-sample j-metric) val))
+             (define dyn-mem (+ act-mem inp-mem))
+             
+             (define available-for-cache (- vram-limit-bytes (+ req-mem dyn-mem)))
+             
+             (define kept-cached-indices '())
+             (define current-cache-fill 0)
+             
+             (for ([c idle-candidates])
+               (match-define (list _ idx size _ _) c)
+               (when (<= (+ current-cache-fill size) available-for-cache)
+                 (set! kept-cached-indices (cons idx kept-cached-indices))
+                 (set! current-cache-fill (+ current-cache-fill size))))
+             
+             (define active-set (append required-indices kept-cached-indices))
+             
+             (define loaded (filter (lambda (x) (not (member x resident-set))) required-indices))
+             (define held-active (filter (lambda (x) (member x resident-set)) required-indices))
+             (define held-cached (filter (lambda (x) (member x resident-set)) kept-cached-indices))
+             (define evicted (filter (lambda (x) (and (member x resident-set) 
+                                                      (not (member x active-set))
+                                                      (member x (map second idle-candidates)))) 
+                                     resident-set))
+             (define freed (filter (lambda (x) (and (member x resident-set) 
+                                                    (not (member x active-set))
+                                                    (not (member x (map second idle-candidates))))) 
+                                   resident-set))
+
+             (printf "Job ~a (~a): Batch ~a\n" (+ 1 j-idx) (job-metrics-name j-metric) val)
+             
+             (unless (empty? loaded)      (printf "  [+] LOADS:   ~a\n" (ids->names loaded)))
+             (unless (empty? held-active) (printf "  [=] HOLDS:   ~a (Active)\n" (ids->names held-active)))
+             (unless (empty? held-cached) (printf "  [=] CACHES:  ~a (Idle)\n" (ids->names held-cached)))
+             (unless (empty? evicted)     (printf "  [-] EVICTS:  ~a (To save space)\n" (ids->names evicted)))
+             (unless (empty? freed)       (printf "  [-] FREES:   ~a (Lifespan ended)\n" (ids->names freed)))
+             
+             (printf "  - Memory Breakdown:\n")
+             (printf "    * Weights:     ~a MB\n" (~r (/ req-mem 1024.0 1024.0) #:precision 2))
+             (printf "    * Activations: ~a MB\n" (~r (/ act-mem 1024.0 1024.0) #:precision 2))
+             (printf "    * Dataset:     ~a MB\n" (~r (/ inp-mem 1024.0 1024.0) #:precision 2))
+             (when (> current-cache-fill 0)
+                (printf "    * Cached:      ~a MB\n" (~r (/ current-cache-fill 1024.0 1024.0) #:precision 2)))
+
+             (printf "  >>> VRAM: ~a MB / ~a MB\n" 
+                     (~r (/ (+ req-mem dyn-mem current-cache-fill) 1024.0 1024.0) #:precision 2) vram-limit-mb)
+             (printf "------------------------------------------------------------\n")
+             (set! resident-set active-set))
+           #t))]))
 
 ;; ============================================================
-;; 5. Pipeline Macro
+;; 4. Pipeline Macro
 ;; ============================================================
 
 (define (parse-pipeline-args args)
@@ -198,18 +251,14 @@
   (define config 
     (if with-clause
         (match (cadr with-clause)
-          [(list (list _ v)) (pipeline-config v)] ;; Match any key for VRAM
+          [(list (list _ v)) (pipeline-config v)] 
           [_ (error "Invalid pipeline config. Expected ((vram X))")])
         (pipeline-config 100000)))
   (values jobs config))
 
 (define-syntax pipeline
   (syntax-rules (with)
-    ;; Case 1: Match pipeline jobs ... with ((v limit))
-    ;; We use 'v' as a wildcard variable here to accept 'vram'
     [(_ item ... with ((v limit)))
      (solve-pipeline (list item ...) (pipeline-config limit))]
-    
-    ;; Case 2: No config provided
     [(_ item ...)
      (solve-pipeline (list item ...) (pipeline-config 100000))]))
