@@ -43,7 +43,6 @@
 ;; 2. Job Analysis
 ;; ============================================================
 
-;; Updated struct to store separated memory factors
 (struct job-metrics (id name models static-bytes act-bytes-per-sample input-bytes-per-sample max-count) #:transparent)
 
 (define (analyze-job job index)
@@ -81,10 +80,8 @@
        index
        (dataset-struct-spec data)
        models
-       0 ;; Placeholder for aggregated static (unused in liveness solver)
-       ;; Activations: Total elements * 4 bytes (float32) * 2 (fwd+bwd)
+       0 
        (inexact->exact (round (* total-activation-elements 4 2))) 
-       ;; Input Data: Elements * data-width
        (inexact->exact (round (* input-elements data-bytes)))
        (dataset-struct-count data))))
 
@@ -103,6 +100,7 @@
 
   (printf "\n=== Pipeline Memory Planning ===\n")
   (printf "Global VRAM Budget: ~a MB\n" vram-limit-mb)
+  (printf "Strategy: ~a\n" (pipeline-config-strategy config))
   
   (define metrics-list
     (for/list ([j jobs] [i (in-naturals 1)])
@@ -155,7 +153,6 @@
             (filter (lambda (c) (member (first c) (job-metrics-models j-metric))) component-info))
           
           (define required-mem (apply + (map third required-comps)))
-          ;; Updated to use sum of activations + inputs
           (define dynamic-mem-expr 
             (* (+ (job-metrics-act-bytes-per-sample j-metric) 
                   (job-metrics-input-bytes-per-sample j-metric)) 
@@ -189,8 +186,6 @@
                        component-info))
              
              (define req-mem (apply + (map get-comp-size required-indices)))
-             
-             ;; Calculate broken down memory costs
              (define act-mem (* (job-metrics-act-bytes-per-sample j-metric) val))
              (define inp-mem (* (job-metrics-input-bytes-per-sample j-metric) val))
              (define dyn-mem (+ act-mem inp-mem))
@@ -245,20 +240,35 @@
 ;; 4. Pipeline Macro
 ;; ============================================================
 
-(define (parse-pipeline-args args)
-  (define with-clause (findf (lambda (x) (and (list? x) (eq? (car x) 'with))) args))
-  (define jobs (filter train-job? args))
-  (define config 
-    (if with-clause
-        (match (cadr with-clause)
-          [(list (list _ v)) (pipeline-config v)] 
-          [_ (error "Invalid pipeline config. Expected ((vram X))")])
-        (pipeline-config 100000)))
-  (values jobs config))
+(define (parse-config raw-configs)
+  (define vram 100000)
+  (define strategy 'maximize-throughput)
+  
+  (for ([c raw-configs])
+    (match c
+      [(list 'vram v) (set! vram v)]
+      [(list 'strategy s) (set! strategy s)]
+      [_ (error "Unknown config option inside 'with':" c)]))
+      
+  (pipeline-config vram strategy))
 
-(define-syntax pipeline
+;; Recursive macro to avoid "misplaced ellipsis"
+(define-syntax pipeline-core
   (syntax-rules (with)
-    [(_ item ... with ((v limit)))
-     (solve-pipeline (list item ...) (pipeline-config limit))]
-    [(_ item ...)
-     (solve-pipeline (list item ...) (pipeline-config 100000))]))
+    ;; Found 'with': The rest is configuration
+    [(_ (jobs ...) (with . configs))
+     (solve-pipeline (list jobs ...) (parse-config 'configs))]
+    
+    ;; Found a job (not 'with'): Add to jobs list and recurse
+    [(_ (jobs ...) (job . rest))
+     (pipeline-core (jobs ... job) rest)]
+    
+    ;; Empty list: Done
+    [(_ (jobs ...) ())
+     (solve-pipeline (list jobs ...) (parse-config '()))]))
+
+;; Entry point macro
+(define-syntax pipeline
+  (syntax-rules ()
+    [(_ . args)
+     (pipeline-core () args)]))
