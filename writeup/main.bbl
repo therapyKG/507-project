@@ -1,0 +1,29 @@
+\begin{thebibliography}{1}
+
+\bibitem{analyzer}
+Ho~Young Jhoo, Sehoon Kim, Woosung Song, Kyuyeon Park, DongKwon Lee, and
+  Kwangkeun Yi.
+\newblock A static analyzer for detecting tensor shape errors in deep neural
+  network training code.
+\newblock In {\em Proceedings of the ACM/IEEE 44th International Conference on
+  Software Engineering: Companion Proceedings}, ICSE '22, page 337–338, New
+  York, NY, USA, 2022. Association for Computing Machinery.
+
+\bibitem{llmc}
+Andrej Karpathy.
+\newblock llm.c: Llm training in simple, raw c/cuda.
+\newblock \url{https://github.com/karpathy/llm.c}, 2024.
+\newblock Accessed: \today.
+
+\bibitem{kirisame2021dynamictensorrematerialization}
+Marisa Kirisame, Steven Lyubomirsky, Altan Haan, Jennifer Brennan, Mike He,
+  Jared Roesch, Tianqi Chen, and Zachary Tatlock.
+\newblock Dynamic tensor rematerialization, 2021.
+
+\bibitem{zhao2023rockmateefficientfastautomatic}
+Xunyi Zhao, Théotime~Le Hellard, Lionel Eyraud, Julia Gusak, and Olivier
+  Beaumont.
+\newblock Rockmate: an efficient, fast, automatic and generic tool for
+  re-materialization in pytorch, 2023.
+
+\end{thebibliography}
