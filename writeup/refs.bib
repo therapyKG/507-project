@@ -1,0 +1,46 @@
+@inproceedings{analyzer,
+author = {Jhoo, Ho Young and Kim, Sehoon and Song, Woosung and Park, Kyuyeon and Lee, DongKwon and Yi, Kwangkeun},
+title = {A static analyzer for detecting tensor shape errors in deep neural network training code},
+year = {2022},
+isbn = {9781450392235},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+url = {https://doi.org/10.1145/3510454.3528638},
+doi = {10.1145/3510454.3528638},
+abstract = {We present an automatic static analyzer PyTea that detects tensor-shape errors in PyTorch code. The tensor-shape error is critical in the deep neural net code; much of the training cost and intermediate results are to be lost once a tensor shape mismatch occurs in the midst of the training phase. Given the input PyTorch source, PyTea statically traces every possible execution path, collects tensor shape constraints required by the tensor operation sequence of the path, and decides if the constraints are unsatisfiable (hence a shape error can occur). PyTea's scalability and precision hinges on the characteristics of real-world PyTorch applications: the number of execution paths after PyTea's conservative pruning rarely explodes and loops are simple enough to be circumscribed by our symbolic abstraction. We tested PyTea against the projects in the official PyTorch repository and some tensor-error code questioned in the StackOverflow. PyTea successfully detects tensor shape errors in these codes, each within a few seconds.},
+booktitle = {Proceedings of the ACM/IEEE 44th International Conference on Software Engineering: Companion Proceedings},
+pages = {337–338},
+numpages = {2},
+keywords = {PyTorch, Python, SMT solver, error detection, static analysis, tensor shape mismatch},
+location = {Pittsburgh, Pennsylvania},
+series = {ICSE '22}
+}
+@misc{zhao2023rockmateefficientfastautomatic,
+      title={Rockmate: an Efficient, Fast, Automatic and Generic Tool for Re-materialization in PyTorch}, 
+      author={Xunyi Zhao and Théotime Le Hellard and Lionel Eyraud and Julia Gusak and Olivier Beaumont},
+      year={2023},
+      eprint={2307.01236},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2307.01236}, 
+}
+
+@misc{llmc,
+  author = {Karpathy, Andrej},
+  title = {llm.c: LLM training in simple, raw C/CUDA},
+  year = {2024},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/karpathy/llm.c}},
+  note = {Accessed: \today}
+}
+
+@misc{kirisame2021dynamictensorrematerialization,
+      title={Dynamic Tensor Rematerialization}, 
+      author={Marisa Kirisame and Steven Lyubomirsky and Altan Haan and Jennifer Brennan and Mike He and Jared Roesch and Tianqi Chen and Zachary Tatlock},
+      year={2021},
+      eprint={2006.09616},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2006.09616}, 
+}
